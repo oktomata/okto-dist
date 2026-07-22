@@ -1,0 +1,121 @@
+name: sign-release
+
+# Signs a release's artifacts under THIS repo's own OIDC identity, so
+# `install.sh` / `install.ps1` / `okto update` verify against
+# `oktomata/okto-dist` and nothing points at any other repository.
+#
+# Keyless Sigstore ties the certificate identity to the repo AND the git
+# ref the signing workflow runs on. That's why signing lives here rather
+# than upstream: only a workflow running in this repo, dispatched against
+# the release tag, produces an
+# `oktomata/okto-dist/.github/workflows/sign-release.yml@refs/tags/<tag>`
+# identity — which is exactly what the installers pin (per version).
+#
+# Flow: the upstream build uploads the archives + .sha256 + SBOM to a
+# (draft) release here, then dispatches this workflow AGAINST THE TAG REF
+# (`gh workflow run sign-release.yml --ref <tag> -f tag=<tag>`). This job
+# downloads those assets, produces a self-contained `.cosign.bundle` per
+# artifact, uploads the bundles back, and (optionally) publishes the
+# release. Dispatching against the tag (not a branch) is what makes the
+# certificate's `@refs/tags/<tag>` ref claim match the version installed.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to sign, e.g. v0.1.0"
+        required: true
+        type: string
+      publish:
+        description: "Flip the release from draft to published after signing."
+        required: false
+        type: boolean
+        default: true
+      latest:
+        description: "Also mark it the 'latest' stable release (promote). Ignored for prereleases."
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # download assets + upload bundles + edit the release
+  # Sigstore keyless signing exchanges this OIDC token for a short-lived
+  # Fulcio cert — no long-lived signing key to manage.
+  id-token: write
+
+jobs:
+  sign:
+    name: sign release ${{ inputs.tag }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: verify run ref is the release tag
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -eu
+          # The keyless cert's ref claim comes from the ref this run was
+          # dispatched against. The installers pin `@refs/tags/<tag>`, so
+          # this MUST run on `refs/tags/$TAG` — dispatching against a
+          # branch (or the wrong tag) would mint an identity nothing trusts.
+          if [ "${GITHUB_REF}" != "refs/tags/${TAG}" ]; then
+            echo "::error::this workflow must be dispatched against refs/tags/${TAG}, got ${GITHUB_REF}." >&2
+            echo "re-run with: gh workflow run sign-release.yml --ref ${TAG} -f tag=${TAG}" >&2
+            exit 1
+          fi
+
+      - name: install cosign
+        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+
+      - name: download release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -eu
+          mkdir -p release
+          # Only the signable artifacts — not any bundle from a prior run.
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir release \
+            --pattern '*.tar.gz' \
+            --pattern '*.zip' \
+            --pattern 'okto-sbom.cdx.json'
+          ls -la release
+
+      - name: sign artifacts (keyless)
+        env:
+          COSIGN_YES: "true"
+        run: |
+          set -eu
+          cd release
+          # Match what the installers fetch: a `.cosign.bundle` beside each
+          # archive, plus the SBOM. The `.sha256` sidecars aren't signed —
+          # the bundle, not the hash file, is the integrity root.
+          for f in *.tar.gz *.zip okto-sbom.cdx.json; do
+            [ -e "$f" ] || continue
+            cosign sign-blob --yes --bundle "${f}.cosign.bundle" "$f"
+            echo "signed $f -> ${f}.cosign.bundle"
+          done
+          ls -la
+
+      - name: upload bundles to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -eu
+          # --clobber so a re-sign (e.g. promote re-run) overwrites cleanly.
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber release/*.cosign.bundle
+
+      - name: publish release
+        if: ${{ inputs.publish }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -eu
+          # Flip draft -> published only after the bundles are attached, so
+          # a release is never live without its signatures.
+          if [ "${{ inputs.latest }}" = "true" ]; then
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          else
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+          fi
