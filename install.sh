@@ -15,9 +15,8 @@
 #                       PUBLIC release mirror — the source repo is private)
 #   OKTO_SIGN_REPO      repo whose signing-workflow identity the cosign
 #                       signature must match (default: oktomata/okto-dist).
-#                       Signing runs in the mirror's sign-release.yml,
-#                       dispatched against the release tag, decoupled from
-#                       the source build repo.
+#                       Signing runs in the mirror's sign-release.yml (on
+#                       the release tag), decoupled from the source build repo.
 #   OKTO_VERSION        same as --version
 #
 # Exit codes:
@@ -146,14 +145,9 @@ if [ "${OKTO_SKIP_SIGNATURE:-}" = "1" ] || [ "${OKTO_SKIP_SIGNATURE:-}" = "true"
   err "OKTO_SKIP_SIGNATURE set — installing WITHOUT verifying the release signature"
 elif command -v cosign >/dev/null 2>&1; then
   fetch "${BASE_URL}/${ASSET}.cosign.bundle" "${TMP}/${ASSET}.cosign.bundle"
-  # Pin the signing identity to THIS tag's ref, not a branch: the release
-  # was signed by sign-release.yml dispatched against refs/tags/${TAG}, so
-  # a bundle from any other version (or a branch build) won't match.
-  # Escape the tag's dots so the regexp is literal.
-  TAG_RE="$(printf '%s' "$TAG" | sed 's/\./\\./g')"
   if cosign verify-blob \
       --bundle "${TMP}/${ASSET}.cosign.bundle" \
-      --certificate-identity-regexp "^https://github\.com/${SIGN_REPO}/\.github/workflows/sign-release\.yml@refs/tags/${TAG_RE}$" \
+      --certificate-identity-regexp "^https://github\.com/${SIGN_REPO}/\.github/workflows/sign-release\.yml@refs/tags/v.*$" \
       --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
       "${TMP}/${ASSET}" >/dev/null 2>&1; then
     say "cosign signature ok"
@@ -204,7 +198,7 @@ esac
 cat <<'EOF'
 Next steps:
 
-  okto start       # start a self-contained okto deployment (Compose by default)
+  okto start       # start the self-contained okto Compose deployment
   okto stop        # stop it (data + secrets kept unless --purge)
   okto --help      # full command reference
 

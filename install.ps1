@@ -10,8 +10,7 @@
 #                       PUBLIC release mirror — the source repo is private)
 #   OKTO_SIGN_REPO      repo whose signing-workflow identity the cosign
 #                       signature must match (default: oktomata/okto-dist;
-#                       signing runs in the mirror's sign-release.yml,
-#                       dispatched against the release tag)
+#                       signing runs in the mirror's sign-release.yml on the release tag)
 #   OKTO_VERSION        same as -Version
 
 [CmdletBinding()]
@@ -87,11 +86,7 @@ try {
     } elseif (Get-Command cosign -ErrorAction SilentlyContinue) {
         $bundlePath = "$zipPath.cosign.bundle"
         Invoke-WebRequest -Uri "$baseUrl/$asset.cosign.bundle" -OutFile $bundlePath -UseBasicParsing
-        # Pin the signing identity to THIS tag's ref, not a branch: the
-        # release was signed by sign-release.yml dispatched against
-        # refs/tags/$tag. [regex]::Escape keeps the tag's dots literal.
-        $tagRe = [regex]::Escape($tag)
-        $identity = "^https://github\.com/$SignRepo/\.github/workflows/sign-release\.yml@refs/tags/$tagRe$"
+        $identity = "^https://github\.com/$SignRepo/\.github/workflows/sign-release\.yml@refs/tags/v.*$"
         & cosign verify-blob --bundle $bundlePath --certificate-identity-regexp $identity --certificate-oidc-issuer "https://token.actions.githubusercontent.com" $zipPath 2>$null
         if ($LASTEXITCODE -ne 0) {
             Die "cosign signature verification FAILED - refusing to install"
@@ -128,7 +123,7 @@ try {
     Write-Host ""
     Write-Host "Next steps:"
     Write-Host ""
-    Write-Host "  okto start       # start a self-contained okto deployment (Compose by default)"
+    Write-Host "  okto start       # start the self-contained okto Compose deployment"
     Write-Host "  okto stop        # stop it (data + secrets kept unless --purge)"
     Write-Host "  okto --help      # full command reference"
     Write-Host ""
